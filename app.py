@@ -51,15 +51,22 @@ from inference_sdk import InferenceHTTPClient
 
 ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY")
 
-CLIENT = InferenceHTTPClient(
-    api_url="https://serverless.roboflow.com",
-    api_key=ROBOFLOW_API_KEY
-)
+if not ROBOFLOW_API_KEY:
+    print("[Backend] WARNING: ROBOFLOW_API_KEY not set – inference will be disabled.")
+    CLIENT = None
+else:
+    CLIENT = InferenceHTTPClient(
+        api_url="https://serverless.roboflow.com",
+        api_key=ROBOFLOW_API_KEY
+    )
 
 THRESHOLD = 0.5
 
 # Helper function to run a single inference
 def run_model_inference(model_id, image_path):
+    if CLIENT is None:
+        # Inference disabled – return empty predictions
+        return {"predictions": []}
     try:
         return CLIENT.infer(image_path, model_id=model_id)
     except Exception as e:
@@ -117,6 +124,10 @@ def analyze_image(image_path):
 # -----------------------------------------------------------------------------
 # ENDPOINT
 # -----------------------------------------------------------------------------
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({"status": "ok", "roboflow_ready": CLIENT is not None}), 200
+
 @app.route("/analyze-image", methods=["POST"])
 def analyze_image_endpoint():
     if "image" not in request.files:
@@ -125,10 +136,14 @@ def analyze_image_endpoint():
     file = request.files["image"]
     if file.filename == "":
         return jsonify({"error": "No selected file"}), 400
+
+    if CLIENT is None:
+        return jsonify({"error": "ROBOFLOW_API_KEY not configured on server"}), 503
         
-    # Save the file to a temporary location
-    temp_dir = tempfile.gettempdir()
-    temp_path = os.path.join(temp_dir, file.filename)
+    # Save the file to a temporary location with a unique name
+    import uuid
+    ext = os.path.splitext(file.filename)[1] or ".jpg"
+    temp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4().hex}{ext}")
     file.save(temp_path)
     
     try:
@@ -139,6 +154,7 @@ def analyze_image_endpoint():
             os.remove(temp_path)
             
         # Return expected structured response
+        print(f"[Backend] Returning result: label={result['label']}, confidence={result['confidence']}")
         return jsonify({
             "label": result["label"],
             "confidence": float(result["confidence"])
@@ -146,6 +162,7 @@ def analyze_image_endpoint():
     except Exception as e:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+        print(f"[Backend] Error during analysis: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
